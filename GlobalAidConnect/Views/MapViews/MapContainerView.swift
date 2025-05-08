@@ -430,7 +430,7 @@ struct MapContainerView: View {
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 20)
-    }
+    }      
     
     private func filterButton(title: String, icon: String, color: Color, isActive: Bool = false) -> some View {
         Button(action: {
