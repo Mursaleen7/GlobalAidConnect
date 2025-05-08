@@ -1,10 +1,4 @@
 
-Ran tool
-
-Ran tool
-To create a detailed README for both technical and non-technical users, we need to cover several key aspects of the project. Here's a structured outline for the README:
-
----
 
 # GlobalAidConnect
 
