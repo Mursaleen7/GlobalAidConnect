@@ -12,11 +12,39 @@ struct MapContainerView: View {
         span: MKCoordinateSpan(latitudeDelta: 45.0, longitudeDelta: 45.0)
     )
     @State private var selectedMapStyle: MapStyle = .standard
-    @State private var selectedCrisis: Crisis? = nil
+    @State private var selectedCrisis: Crisis? = nil {
+        didSet {
+            // Trigger a prediction when a crisis is first selected, if no prediction exists
+            if let crisis = selectedCrisis, oldValue?.id != crisis.id {
+                // Always fetch a new prediction when switching between crises
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    print("Selected crisis: \(crisis.name), starting prediction...")
+                    // Force enable prediction overlays when a crisis is selected
+                    self.showPredictionOverlays = true
+                    
+                    if self.apiService.crisisPredictions[crisis.id] == nil {
+                        // If no prediction exists, start a new one
+                        print("No existing prediction for \(crisis.name), generating new one...")
+                        self.apiService.startLivePredictionUpdates(for: crisis.id)
+                    } else {
+                        // If prediction is more than 10 minutes old, refresh it
+                        if let prediction = self.apiService.crisisPredictions[crisis.id],
+                           Date().timeIntervalSince(prediction.timestamp) > 600 {
+                            print("Prediction for \(crisis.name) is over 10 minutes old, refreshing...")
+                            self.apiService.startLivePredictionUpdates(for: crisis.id)
+                        } else {
+                            print("Using existing recent prediction for \(crisis.name)")
+                        }
+                    }
+                }
+            }
+        }
+    }
     @State private var showFilterPanel = false
     @State private var showSafeZones = true
     @State private var showEvacuationRoutes = true
     @State private var showEmergencyServices = true
+    @State private var showPredictionOverlays = true // Ensure this is true by default
     @State private var isZoomingToLocation = false
     @State private var cardOffset: CGFloat = 0
     @State private var cardHeight: CGFloat = 120
@@ -48,6 +76,7 @@ struct MapContainerView: View {
                     showSafeZones: showSafeZones,
                     showEvacuationRoutes: showEvacuationRoutes,
                     showEmergencyServices: showEmergencyServices,
+                    showPredictionOverlays: showPredictionOverlays,
                     selectedCrisis: $selectedCrisis,
                     isZoomingToLocation: $isZoomingToLocation,
                     apiService: apiService
@@ -177,6 +206,10 @@ struct MapContainerView: View {
             Toggle("Emergency Services", isOn: $showEmergencyServices)
                 .toggleStyle(SwitchToggleStyle(tint: Color.ui.severityCritical))
                 .font(.system(size: 14, design: .rounded))
+            
+            Toggle("Prediction Overlays", isOn: $showPredictionOverlays)
+                .toggleStyle(SwitchToggleStyle(tint: Color.ui.accent))
+                .font(.system(size: 14, design: .rounded))
         }
         .padding()
         .frame(width: 200)
@@ -196,40 +229,75 @@ struct MapContainerView: View {
     }
     
     private var bottomControlPanel: some View {
-        VStack(spacing: 0) {
-            if selectedCrisis != nil {
-                crisisDetailPanel
-            } else {
-                toolsPanel
-            }
-        }
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.ui.secondaryBackground.opacity(0.95))
-                .shadow(color: Color.black.opacity(0.15), radius: 15, x: 0, y: -5)
-        )
-        .offset(y: cardOffset)
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    let newOffset = max(-300, min(120, value.translation.height))
-                    cardOffset = newOffset
+        ZStack(alignment: .top) {
+            // Loading indicator overlaid on map when fetching prediction
+            if apiService.isFetchingPrediction {
+                VStack {
+                    HStack {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                            .scaleEffect(1.2)
+                        
+                        Text("Generating impact prediction...")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .padding(.leading, 8)
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(Color.ui.secondaryBackground.opacity(0.9))
+                            .shadow(color: Color.black.opacity(0.2), radius: 5, x: 0, y: 2)
+                    )
                 }
-                .onEnded { value in
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7, blendDuration: 0.5)) {
-                        if value.translation.height > 50 {
-                            cardOffset = 120
-                        } else if value.translation.height < -50 {
-                            cardOffset = -300
-                        } else {
-                            cardOffset = 0
+                .transition(.opacity)
+                .zIndex(100)
+                .padding(.top, 60)
+            }
+            
+            // Main bottom panel
+            VStack(spacing: 0) {
+                if selectedCrisis != nil {
+                    crisisDetailPanel
+                } else {
+                    toolsPanel
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(Color.ui.secondaryBackground.opacity(0.95))
+                    .shadow(color: Color.black.opacity(0.15), radius: 15, x: 0, y: -5)
+            )
+            .offset(y: cardOffset)
+            .gesture(
+                DragGesture(minimumDistance: 5, coordinateSpace: .local)
+                    .onChanged { value in
+                        // Use direct assignment for maximum smoothness during drag
+                        cardOffset = max(-350, min(120, value.translation.height))
+                    }
+                    .onEnded { value in
+                        // Use velocity to determine where the card should settle
+                        let velocity = value.predictedEndTranslation.height - value.translation.height
+                        
+                        // Apply stronger spring animation for more natural feel
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75, blendDuration: 0.1)) {
+                            if value.translation.height > 50 || (value.translation.height > 0 && velocity > 150) {
+                                // Collapse to bottom when dragged down
+                                cardOffset = 120
+                            } else if value.translation.height < -50 || (value.translation.height < 0 && velocity < -150) {
+                                // Expand fully when dragged up
+                                cardOffset = -350
+                            } else {
+                                // Return to default position
+                                cardOffset = 0
+                            }
                         }
                     }
-                }
-        )
-        .animation(.spring(response: 0.4, dampingFraction: 0.7, blendDuration: 0.5), value: selectedCrisis)
-        .offset(y: animateUI ? 0 : 150)
-        .animation(.spring(response: 0.6, dampingFraction: 0.7).delay(0.2), value: animateUI)
+            )
+            .animation(.interactiveSpring(response: 0.35, dampingFraction: 0.86, blendDuration: 0.25), value: selectedCrisis)
+            .offset(y: animateUI ? 0 : 150)
+            .animation(.spring(response: 0.6, dampingFraction: 0.7).delay(0.2), value: animateUI)
+        }
     }
     
     private var crisisDetailPanel: some View {
@@ -316,6 +384,41 @@ struct MapContainerView: View {
                         }
                         .padding(.top, 8)
                         
+                        // NEW: Show prediction info if available
+                        if let prediction = apiService.crisisPredictions[crisis.id] {
+                            predictionDetailView(for: prediction)
+                        } else {
+                            VStack(spacing: 8) {
+                                Text("No prediction data available")
+                                    .font(.system(size: 14, design: .rounded))
+                                    .foregroundColor(Color.ui.secondaryText)
+                                
+                                Button(action: {
+                                    apiService.startLivePredictionUpdates(for: crisis.id)
+                                }) {
+                                    HStack {
+                                        Image(systemName: "wand.and.stars")
+                                            .font(.system(size: 16))
+                                        Text("Generate Impact Prediction")
+                                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(
+                                        LinearGradient(
+                                            gradient: Gradient(colors: [Color.ui.accent, Color.ui.accent.opacity(0.8)]),
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .foregroundColor(.white)
+                                    .cornerRadius(10)
+                                }
+                                .shadow(color: Color.ui.accent.opacity(0.3), radius: 5, x: 0, y: 3)
+                            }
+                            .padding(.top, 8)
+                        }
+                        
                         // Action buttons
                         VStack(spacing: 8) {
                             Button("Navigate to Safe Zone") {
@@ -369,6 +472,116 @@ struct MapContainerView: View {
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
+    }
+    
+    // NEW: Prediction details view
+    private func predictionDetailView(for prediction: CrisisPrediction) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Impact Prediction")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundColor(Color.ui.primaryText)
+                
+                Spacer()
+                
+                // Add refresh button
+                Button(action: {
+                    if let crisis = selectedCrisis {
+                        apiService.startLivePredictionUpdates(for: crisis.id)
+                    }
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color.ui.accent)
+                }
+                .padding(.trailing, 4)
+                
+                // Add timestamp to show when prediction was last updated
+                Text("Last updated: \(timeAgo(from: prediction.timestamp))")
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundColor(Color.ui.secondaryText)
+            }
+            
+            if apiService.isFetchingPrediction {
+                HStack {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle())
+                    Text("Updating prediction...")
+                        .font(.system(size: 14, design: .rounded))
+                        .foregroundColor(Color.ui.secondaryText)
+                        .padding(.leading, 8)
+                }
+            } else {
+                Text(prediction.predictionNarrative)
+                    .font(.system(size: 14, design: .rounded))
+                    .foregroundColor(Color.ui.secondaryText)
+                    .padding(.bottom, 4)
+                
+                if let newAffected = prediction.estimatedNewAffectedPopulation, newAffected > 0 {
+                    HStack {
+                        Image(systemName: "person.3.fill")
+                            .foregroundColor(Color.ui.severityHigh)
+                        Text("Est. additional affected: \(newAffected) people")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundColor(Color.ui.severityHigh)
+                    }
+                }
+                
+                if let infrastructure = prediction.criticalInfrastructureAtRisk, !infrastructure.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Critical Infrastructure at Risk:")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundColor(Color.ui.primaryText)
+                        
+                        ForEach(infrastructure.prefix(2), id: \.self) { item in
+                            HStack {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(Color.ui.severityHigh)
+                                    .font(.system(size: 12))
+                                Text(item)
+                                    .font(.system(size: 14, design: .rounded))
+                                    .foregroundColor(Color.ui.secondaryText)
+                            }
+                        }
+                    }
+                }
+                
+                HStack {
+                    Button("Refresh Prediction") {
+                        apiService.startLivePredictionUpdates(for: prediction.id)
+                    }
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule()
+                            .fill(Color.ui.accent)
+                    )
+                    .foregroundColor(.white)
+                    
+                    if !showPredictionOverlays {
+                        Button("Show on Map") {
+                            showPredictionOverlays = true
+                        }
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule()
+                                .fill(Color.ui.accent.opacity(0.7))
+                        )
+                        .foregroundColor(.white)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.ui.secondaryBackground)
+                .shadow(color: Color.black.opacity(0.05), radius: 5, x: 0, y: 2)
+        )
     }
     
     private var toolsPanel: some View {
@@ -482,10 +695,21 @@ struct MapContainerView: View {
         return formatter.string(from: date)
     }
     
+    // Helper to display relative time
     private func timeAgo(from date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        let calendar = Calendar.current
+        let now = Date()
+        let components = calendar.dateComponents([.minute, .hour, .day], from: date, to: now)
+        
+        if let day = components.day, day > 0 {
+            return day == 1 ? "Yesterday" : "\(day) days ago"
+        } else if let hour = components.hour, hour > 0 {
+            return hour == 1 ? "1 hour ago" : "\(hour) hours ago"
+        } else if let minute = components.minute, minute > 0 {
+            return minute == 1 ? "1 minute ago" : "\(minute) minutes ago"
+        } else {
+            return "Just now"
+        }
     }
 }
 
@@ -496,6 +720,7 @@ struct MapView: UIViewRepresentable {
     var showSafeZones: Bool
     var showEvacuationRoutes: Bool
     var showEmergencyServices: Bool
+    var showPredictionOverlays: Bool
     @Binding var selectedCrisis: Crisis?
     @Binding var isZoomingToLocation: Bool
     var apiService: ApiService
@@ -542,27 +767,101 @@ struct MapView: UIViewRepresentable {
         
         // Update routes and zones based on toggles
         updateMapOverlays(on: mapView)
+        
+        // NEW: Update prediction overlays
+        updatePredictionOverlays(on: mapView)
+    }
+    
+    // NEW: Update prediction overlays
+    private func updatePredictionOverlays(on mapView: MKMapView) {
+        // Remove existing prediction overlays
+        mapView.overlays.forEach { overlay in
+            if overlay is CrisisPredictionHeatmapOverlay || overlay is CrisisPredictionPolygonOverlay {
+                mapView.removeOverlay(overlay)
+            }
+        }
+        
+        // Only add overlays if the toggle is enabled
+        guard showPredictionOverlays else { return }
+        
+        print("Adding prediction overlays - predictions count: \(apiService.crisisPredictions.count)")
+        
+        // Add overlays for each crisis that has predictions
+        for (crisisId, prediction) in apiService.crisisPredictions {
+            // Log prediction points for debugging
+            if let heatmapPoints = prediction.riskHeatmapPoints {
+                print("Adding \(heatmapPoints.count) heatmap points for crisis \(crisisId)")
+            }
+            
+            // Ensure the selected crisis predictions are always visible
+            let isSelectedCrisis = selectedCrisis?.id == crisisId
+            
+            // Add risk heatmap points
+            if let heatmapPoints = prediction.riskHeatmapPoints {
+                for point in heatmapPoints {
+                    let coordinate = CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
+                    
+                    // Make higher intensity points have larger radius
+                    let radius = 1000.0 + (5000.0 * point.intensity) // between 1km and 6km for better visibility
+                    
+                    let overlay = CrisisPredictionHeatmapOverlay.createOverlay(
+                        center: coordinate,
+                        radius: radius,
+                        intensity: point.intensity,
+                        crisisId: crisisId
+                    )
+                    
+                    mapView.addOverlay(overlay)
+                }
+            }
+            
+            // Add predicted spread polygons
+            if let polygons = prediction.predictedSpreadPolygons {
+                for polygon in polygons {
+                    // Need at least 3 points for a polygon
+                    guard polygon.count >= 3 else { continue }
+                    
+                    let coordinates = polygon.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+                    
+                    // Create the polygon overlay
+                    if let polygonOverlay = CrisisPredictionPolygonOverlay.createOverlay(coordinates: coordinates, crisisId: crisisId) {
+                        mapView.addOverlay(polygonOverlay)
+                    }
+                }
+            }
+            
+            // If this is the selected crisis, center the map on it if needed
+            if isSelectedCrisis && prediction.riskHeatmapPoints?.isEmpty == false {
+                // Only zoom to prediction if we haven't manually panned the map
+                if let firstPoint = prediction.riskHeatmapPoints?.first {
+                    let center = CLLocationCoordinate2D(latitude: firstPoint.latitude, longitude: firstPoint.longitude)
+                    let span = MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+                    let region = MKCoordinateRegion(center: center, span: span)
+                    mapView.setRegion(region, animated: true)
+                }
+            }
+        }
     }
     
     private func updatePins(on mapView: MKMapView) {
-        // Remove existing crisis annotations
-        let existingAnnotations = mapView.annotations.filter { $0 is CrisisAnnotation }
-        mapView.removeAnnotations(existingAnnotations)
+        // ... existing code ...
         
-        // Add crisis annotations from data source
+        // Replace existing pins with new ones
+        let annotations = mapView.annotations.filter { $0 is CrisisAnnotation }
+        mapView.removeAnnotations(annotations)
+        
         if let crises = apiService.activeCrises {
-            for crisis in crises {
-                if let coordinates = crisis.coordinates {
-                    let annotation = CrisisAnnotation(
-                        coordinate: CLLocationCoordinate2D(
-                            latitude: coordinates.latitude,
-                            longitude: coordinates.longitude
-                        ),
-                        crisis: crisis
-                    )
-                    mapView.addAnnotation(annotation)
-                }
+            let newAnnotations = crises.compactMap { crisis -> CrisisAnnotation? in
+                guard let coordinates = crisis.coordinates else { return nil }
+                return CrisisAnnotation(
+                    coordinate: CLLocationCoordinate2D(
+                        latitude: coordinates.latitude,
+                        longitude: coordinates.longitude
+                    ),
+                    crisis: crisis
+                )
             }
+            mapView.addAnnotations(newAnnotations)
         }
     }
     
@@ -1186,6 +1485,23 @@ struct MapView: UIViewRepresentable {
             parent.region = mapView.region
         }
         
+        // Generate a unique but consistent color based on crisis ID
+        private func colorForCrisisId(_ crisisId: String) -> Color {
+            // Create a simple hash of the crisis ID
+            var hash = 0
+            for char in crisisId {
+                hash = ((hash << 5) &- hash) &+ Int(char.asciiValue ?? 0)
+            }
+            
+            // Use the hash to generate HSB color values
+            // We want vivid colors for better visibility
+            let hueOptions: [Double] = [0.02, 0.05, 0.1, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 0.95]
+            let hue = hueOptions[abs(hash) % hueOptions.count]
+            
+            // Use a high saturation/brightness for better visibility
+            return Color(hue: hue, saturation: 0.9, brightness: 0.9)
+        }
+        
         // Handle overlay rendering for routes, zones, etc.
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if overlay is MKPolyline {
@@ -1193,25 +1509,64 @@ struct MapView: UIViewRepresentable {
                 renderer.strokeColor = UIColor(Color.ui.accent)
                 renderer.lineWidth = 4
                 return renderer
-            } else if overlay is MKPolygon {
-                let renderer = MKPolygonRenderer(overlay: overlay)
-                renderer.fillColor = UIColor(Color.ui.severityLow.opacity(0.2))
-                renderer.strokeColor = UIColor(Color.ui.severityLow)
-                renderer.lineWidth = 2
+            } else if let polygonOverlay = overlay as? CrisisPredictionPolygonOverlay {
+                // Handle prediction polygon overlays with colors based on crisis ID
+                let renderer = MKPolygonRenderer(overlay: polygonOverlay)
+                
+                // Generate a consistent but different color for each crisis
+                let color = colorForCrisisId(polygonOverlay.crisisId)
+                
+                // Higher opacity and more vivid colors
+                renderer.fillColor = UIColor(color.opacity(0.5))
+                renderer.strokeColor = UIColor(color)
+                renderer.lineWidth = 3.5
+                
+                // Use solid line for better visibility
+                return renderer
+            } else if let heatmapOverlay = overlay as? CrisisPredictionHeatmapOverlay {
+                // Handle prediction heatmap overlays with much more visible styling
+                let renderer = MKCircleRenderer(overlay: heatmapOverlay)
+                
+                // Color based on crisis ID and intensity
+                let baseColor = colorForCrisisId(heatmapOverlay.crisisId)
+                
+                // Much higher opacity for visibility
+                let alpha = 0.2 + (heatmapOverlay.intensity * 0.6)
+                renderer.fillColor = UIColor(baseColor.opacity(alpha))
+                
+                // Bold border for visibility
+                renderer.strokeColor = UIColor(baseColor)
+                renderer.lineWidth = 2.5
+                
                 return renderer
             } else if overlay is MKCircle {
                 let renderer = MKCircleRenderer(overlay: overlay)
-                renderer.fillColor = UIColor(Color.ui.severityLow.opacity(0.1))
-                renderer.strokeColor = UIColor(Color.ui.severityLow.opacity(0.7))
-                renderer.lineWidth = 1
-                
-                // Add a subtle pulsing effect by using a pattern of dashes
-                renderer.lineDashPattern = [4, 4]
-                
+                renderer.fillColor = UIColor(Color.ui.accent.opacity(0.2))
+                renderer.strokeColor = UIColor(Color.ui.accent)
+                return renderer
+            } else if overlay is MKPolygon {
+                let renderer = MKPolygonRenderer(overlay: overlay)
+                renderer.fillColor = UIColor(Color.ui.severityLow.opacity(0.3))
+                renderer.strokeColor = UIColor(Color.ui.severityLow)
                 return renderer
             }
             
             return MKOverlayRenderer(overlay: overlay)
+        }
+        
+        // Add a method to coordinate class to trigger prediction when pin is selected
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let annotation = view.annotation as? CrisisAnnotation {
+                // Update selected crisis
+                self.parent.selectedCrisis = annotation.crisis
+                
+                // NEW: Check if we need to fetch a prediction for this crisis
+                let crisisId = annotation.crisis.id
+                if self.parent.apiService.crisisPredictions[crisisId] == nil {
+                    // Start a prediction update since we don't have one yet
+                    self.parent.apiService.startLivePredictionUpdates(for: crisisId)
+                }
+            }
         }
     }
 }
