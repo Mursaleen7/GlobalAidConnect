@@ -1,0 +1,63 @@
+import Foundation
+import CoreLocation
+
+// Represents a single point in a heatmap with an intensity value
+struct HeatmapPoint: Codable, Identifiable {
+    let id = UUID().uuidString // Make it identifiable for SwiftUI lists/maps if needed
+    let latitude: Double
+    let longitude: Double
+    let intensity: Double // e.g., 0.0 to 1.0, where 1.0 is highest risk/impact
+}
+
+// Structured prediction data from Gemini
+struct CrisisPrediction: Codable, Identifiable {
+    let id: String // Corresponds to the crisisId
+    let timestamp: Date
+    let predictionNarrative: String // Textual summary of the prediction
+    let next6HoursOutlook: String?
+    let next24HoursOutlook: String?
+    let estimatedNewAffectedPopulation: Int?
+    let criticalInfrastructureAtRisk: [String]? // e.g., ["Hospital A", "Power Substation B"]
+    let recommendedImmediateActions: [String]?
+    let riskHeatmapPoints: [HeatmapPoint]? // Points for drawing the heatmap
+    let predictedSpreadPolygons: [[Coordinates]]? // Array of polygons (each polygon is an array of Coordinates)
+}
+
+// Helper for Gemini API request/response
+struct GeminiMessage: Codable {
+    let role: String
+    let parts: [GeminiPart]
+}
+
+struct GeminiPart: Codable {
+    let text: String
+}
+
+struct GeminiRequest: Codable {
+    let contents: [GeminiMessage]
+    let generationConfig: GenerationConfig
+}
+
+struct GenerationConfig: Codable {
+    let temperature: Double
+    let maxOutputTokens: Int
+    let responseMimeType: String?
+    
+    init(temperature: Double, maxOutputTokens: Int, responseMimeType: String? = nil) {
+        self.temperature = temperature
+        self.maxOutputTokens = maxOutputTokens
+        self.responseMimeType = responseMimeType
+    }
+}
+
+struct GeminiResponse: Codable {
+    struct GeminiCandidate: Codable {
+        let content: GeminiContent
+    }
+    
+    struct GeminiContent: Codable {
+        let parts: [GeminiPart]
+    }
+    
+    let candidates: [GeminiCandidate]?
+} 
