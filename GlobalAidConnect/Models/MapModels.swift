@@ -147,3 +147,27 @@ struct EvacuationRoute: Identifiable, Decodable {
         sourceAPI = try container.decode(String.self, forKey: .sourceAPI)
     }
 }
+
+// MARK: - Prediction Visualization Overlays
+class CrisisPredictionHeatmapOverlay: MKCircle {
+    var intensity: Double = 0.5
+    var crisisId: String = ""
+    
+    static func createOverlay(center: CLLocationCoordinate2D, radius: CLLocationDistance, intensity: Double, crisisId: String) -> CrisisPredictionHeatmapOverlay {
+        let overlay = CrisisPredictionHeatmapOverlay(center: center, radius: radius)
+        overlay.intensity = intensity
+        overlay.crisisId = crisisId
+        return overlay
+    }
+}
+
+class CrisisPredictionPolygonOverlay: MKPolygon {
+    var crisisId: String = ""
+    
+    static func createOverlay(coordinates: [CLLocationCoordinate2D], crisisId: String) -> CrisisPredictionPolygonOverlay? {
+        guard coordinates.count >= 3 else { return nil }
+        let polygon = CrisisPredictionPolygonOverlay(coordinates: coordinates, count: coordinates.count)
+        polygon.crisisId = crisisId
+        return polygon
+    }
+}
