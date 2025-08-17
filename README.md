@@ -1,4 +1,4 @@
-# GlobalAidConnect
+# GlobalAidConnect Application
 
 ## Project Overview and Impact
 
